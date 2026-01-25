@@ -1,0 +1,165 @@
+╔═══════════════════════════════════════════════════════════════════════╗
+║                      🚀 เริ่มใช้งาน img_ana                          ║
+╚═══════════════════════════════════════════════════════════════════════╝
+
+📍 คุณอยู่ที่: /home/sutpct/Workspace/img_recon/hull/
+
+═══════════════════════════════════════════════════════════════════════
+
+✅ คุณมี OUTPUT ที่พร้อมใช้อยู่แล้ว 5 FOLDERS!
+
+1. ./out_img_recon               (92.0 GB) ⭐ แนะนำใช้อันนี้
+2. ./out_img_recon2              (92.1 GB)
+3. ./out_img_recon3              (92.1 GB)
+4. ./output_hull_fast_optimized  (92.1 GB)
+5. ./output_hull_optimized       (3.0 GB)
+
+═══════════════════════════════════════════════════════════════════════
+
+🎯 3 SCRIPTS สำคัญที่ต้องรู้จัก:
+
+1. python check_output.py
+   → ดู output folders ที่มีอยู่ทั้งหมด
+
+2. python run_reconstruction.py
+   → รัน reconstruction ใหม่
+
+3. python img_ana/tests/test_modules.py
+   → ทดสอบว่า modules ใช้งานได้
+
+═══════════════════════════════════════════════════════════════════════
+
+🚀 เริ่มต้นใช้งาน (เลือก 1 ใน 3 วิธี)
+
+┌─────────────────────────────────────────────────────────────────────┐
+│ วิธีที่ 1: ใช้ Output ที่มีอยู่แล้ว (เร็วที่สุด!)                  │
+└─────────────────────────────────────────────────────────────────────┘
+
+   # ตรวจสอบ output ที่มี
+   python check_output.py
+
+   # โหลดใน Python
+   import numpy as np
+   result = np.load('./out_img_recon/BackProjection_hull.npy')
+   print(result.shape)  # (512, 512, 512)
+
+   # ดูภาพ PNG ที่สร้างไว้
+   ls ./out_img_recon/proton_paths_images_2/*.png
+
+
+┌─────────────────────────────────────────────────────────────────────┐
+│ วิธีที่ 2: รัน Reconstruction ใหม่ (ใช้ script สำเร็จรูป)          │
+└─────────────────────────────────────────────────────────────────────┘
+
+   # แก้ config ใน run_reconstruction.py (ถ้าต้องการ)
+   nano run_reconstruction.py
+
+   # รัน
+   python run_reconstruction.py
+
+   # Script จะ:
+   - หา CSV files อัตโนมัติ
+   - สร้าง output folder
+   - รัน reconstruction
+   - บันทึกผลลัพธ์
+
+
+┌─────────────────────────────────────────────────────────────────────┐
+│ วิธีที่ 3: เขียนโค้ด Python เอง (ยืดหยุ่นที่สุด)                  │
+└─────────────────────────────────────────────────────────────────────┘
+
+   # สร้างไฟล์ my_script.py
+   import sys
+   sys.path.insert(0, '/home/sutpct/Workspace/img_recon/hull')
+
+   from img_ana import HullImageReconstruction
+
+   reconstructor = HullImageReconstruction(
+       csv_paths=['data1.csv', 'data2.csv'],
+       output_path='./my_output',
+       device='cuda'
+   )
+
+   result = reconstructor.reconstruct(use_hull=True)
+
+   # รัน
+   python my_script.py
+
+═══════════════════════════════════════════════════════════════════════
+
+📖 เอกสารทั้งหมด
+
+1. USAGE_GUIDE.md           - คู่มือใช้งานฉบับสมบูรณ์ ⭐ อ่านนี้ก่อน
+2. README.md                - ภาพรวมโปรเจกต์
+3. img_ana/README.md        - API documentation
+4. img_ana/COMPLETE.md      - Package status
+5. img_ana/SUMMARY.txt      - สรุปแบบ ASCII
+
+═══════════════════════════════════════════════════════════════════════
+
+💡 Quick Commands
+
+# ดู output ที่มี
+python check_output.py
+
+# รัน reconstruction ใหม่
+python run_reconstruction.py
+
+# ทดสอบ modules
+python img_ana/tests/test_modules.py
+
+# ดูคำสั่งเพิ่มเติม
+python img_ana/examples/example_using_modules.py --help
+
+═══════════════════════════════════════════════════════════════════════
+
+🎯 ตัวอย่างโค้ดใช้งานจริง
+
+# โหลด output ที่มี
+import numpy as np
+result = np.load('./out_img_recon/BackProjection_hull.npy')
+print(f"Shape: {result.shape}")
+print(f"Min: {result.min():.2f}, Max: {result.max():.2f}")
+
+# Plot slice
+import matplotlib.pyplot as plt
+plt.imshow(result[:, :, 256], cmap='gray')
+plt.show()
+
+═══════════════════════════════════════════════════════════════════════
+
+📂 โครงสร้างโปรเจกต์
+
+hull/
+├── img_ana/                    🎯 Refactored package (ใช้อันนี้!)
+│   ├── core/                  Physics & geometry
+│   ├── processing/            Data pipeline
+│   ├── visualization/         Plotting
+│   ├── utils/                 Utilities
+│   ├── examples/              Usage examples
+│   ├── tests/                 Test suite
+│   └── docs/                  Documentation
+│
+├── run_reconstruction.py       🚀 รันทันที
+├── check_output.py             🔍 ตรวจสอบ output
+├── USAGE_GUIDE.md              📖 คู่มือสมบูรณ์
+│
+└── out_img_recon*/             💾 Output folders (มี 5 folders)
+
+═══════════════════════════════════════════════════════════════════════
+
+🎉 คุณมีทั้ง:
+   ✅ Output ที่พร้อมใช้ (5 folders, รวม >360 GB)
+   ✅ Scripts สำเร็จรูป (run_reconstruction.py, check_output.py)
+   ✅ Package สมบูรณ์ (img_ana/)
+   ✅ เอกสารครบถ้วน (USAGE_GUIDE.md)
+
+═══════════════════════════════════════════════════════════════════════
+
+❓ ต้องการความช่วยเหลือ?
+
+1. อ่าน USAGE_GUIDE.md
+2. รัน python check_output.py เพื่อดู output
+3. ลองรัน python img_ana/tests/test_modules.py
+
+═══════════════════════════════════════════════════════════════════════
