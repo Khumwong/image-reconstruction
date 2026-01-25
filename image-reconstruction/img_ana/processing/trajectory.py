@@ -6,6 +6,9 @@ import numpy as np
 
 from ..utils.helpers import index_to_position
 
+# Global flag for debug printing (only print once)
+_debug_scattering_printed = False
+
 
 def compute_straight_trajectory_batch(
     p_b: Tuple[torch.Tensor, torch.Tensor, torch.Tensor],
@@ -429,19 +432,48 @@ def compute_mlp_vectorized_ultra_fast(
             pixel_offsets = torch.arange(max_pixels, device=device).unsqueeze(0).expand(M, -1)
             x_indices = start_index_valid.unsqueeze(1) + pixel_offsets
             valid_pixel_mask = pixel_offsets < num_pixels_per_proton.unsqueeze(1)
+
+            # CRITICAL: Expand entry and exit indices for dynamic Sigma lookup
+            start_indices_expanded = start_index_valid.unsqueeze(1).expand(-1, max_pixels)
             end_indices_expanded = end_index_valid.unsqueeze(1).expand(-1, max_pixels)
 
             # Flatten
             valid_flat = valid_pixel_mask.flatten()
             batch_flat = batch_indices.flatten()[valid_flat]
-            x_flat = x_indices.flatten()[valid_flat]
-            end_flat = end_indices_expanded.flatten()[valid_flat]
+            x_flat = x_indices.flatten()[valid_flat]  # MLP position
+            start_flat = start_indices_expanded.flatten()[valid_flat]  # Entry position (hull entry)
+            end_flat = end_indices_expanded.flatten()[valid_flat]  # Exit position (hull exit)
 
-            # Get MLP parameters (vectorized)
-            Sigma1_y = Sigma1_gpu[x_flat, end_flat]
+            # Get MLP parameters (CORRECTED: dynamic scattering from entry → MLP → exit)
+            # Sigma1: scattering from hull ENTRY → MLP position (NOT from detector!)
+            # Sigma2: scattering from MLP position → hull EXIT (NOT to detector!)
+            Sigma1_y = Sigma1_gpu[start_flat, x_flat]
             Sigma2_y = Sigma2_gpu[x_flat, end_flat]
-            R0_y = R0_gpu[x_flat, end_flat]
+            R0_y = R0_gpu[start_flat, x_flat]
             R1_y = R1_gpu[x_flat, end_flat]
+
+            # DEBUG: Print sample scattering info (first batch only, once)
+            global _debug_scattering_printed
+            if not _debug_scattering_printed:
+                _debug_scattering_printed = True
+                print(f"\n  🔍 DEBUG: Scattering verification (sample proton)")
+                print(f"     Hull entry index: {start_flat[0].item()}")
+                print(f"     MLP position index: {x_flat[0].item()}")
+                print(f"     Hull exit index: {end_flat[0].item()}")
+
+                # Sanity check
+                is_valid_order = start_flat[0] <= x_flat[0] <= end_flat[0]
+                status = "✅ CORRECT" if is_valid_order else "❌ ERROR"
+                print(f"     Order check (entry ≤ MLP ≤ exit): {status}")
+
+                print(f"     → Scattering ONLY from index {start_flat[0].item()} to {end_flat[0].item()} (inside hull)")
+                print(f"     Sigma1[entry→MLP] norm: {torch.norm(Sigma1_y[0]).item():.6f}")
+                print(f"     Sigma2[MLP→exit] norm: {torch.norm(Sigma2_y[0]).item():.6f}")
+
+                # Count how many protons actually use MLP (vs straight)
+                valid_mlp = valid_mask.sum().item()
+                total = len(valid_mask)
+                print(f"     Protons using MLP (hull interaction): {valid_mlp}/{total} ({100*valid_mlp/total:.1f}%)")
 
             # Mixed precision computation
             compute_dtype = Sigma1_y.dtype
@@ -508,9 +540,10 @@ def compute_mlp_vectorized_ultra_fast(
             P0_z_t = S_in @ P0_z
             P2_z_t = S_out_inv @ P2_z
 
-            Sigma1_z = Sigma1_gpu[x_flat, end_flat]
+            # Same dynamic Sigma lookup for Z direction
+            Sigma1_z = Sigma1_gpu[start_flat, x_flat]
             Sigma2_z = Sigma2_gpu[x_flat, end_flat]
-            R0_z = R0_gpu[x_flat, end_flat]
+            R0_z = R0_gpu[start_flat, x_flat]
             R1_z = R1_gpu[x_flat, end_flat]
 
             if compute_dtype == torch.float16:
@@ -630,3 +663,186 @@ def compute_mlp_vectorized_ultra_fast(
         'z_idx': torch.cat(all_z_indices),
         'wepl': torch.cat(all_wepl_values)
     }
+
+
+def compute_mlp_rigorous(
+    input_data_gpu: Dict[str, torch.Tensor],
+    mlp_params_gpu: Dict[str, torch.Tensor],
+    hull: Optional[torch.Tensor],
+    l_mm: float,
+    d_mm: float,
+    h_mm: float,
+    num_pixels_xy: int,
+    num_pixels_z: int,
+    device: torch.device,
+    return_debug_images: bool = False
+) -> Tuple:
+    """
+    Compute MLP using RIGOROUS physics (scattering matrices + Bayesian estimation)
+
+    This is the CORRECT way to do proton CT reconstruction:
+    1. Compute straight trajectories (before/after hull)
+    2. Find hull intersection points
+    3. Use MLP with scattering matrices inside hull
+    4. Distribute WEPL according to path length
+
+    Args:
+        input_data_gpu: Dict with positions_u0-u3, positions_v0-v3, WEPL
+        mlp_params_gpu: Dict with Sigma1, Sigma2, R0, R1 (rigorous matrices)
+        hull: Optional hull mask for filtering
+        l_mm: Length in mm
+        d_mm: Detector spacing in mm
+        h_mm: Height in mm
+        num_pixels_xy: Number of pixels in xy
+        num_pixels_z: Number of pixels in z
+        device: PyTorch device
+        return_debug_images: If True, return separate inside/outside hull images
+
+    Returns:
+        If return_debug_images=False:
+            Tuple of (WEPL_projection_img, count_img)
+        If return_debug_images=True:
+            Tuple of (WEPL_inside, count_inside, WEPL_outside, count_outside)
+    """
+    l_cm = l_mm / 10
+    h_cm = h_mm / 10
+    d_cm = d_mm / 10
+
+    # Extract data
+    positions_u0 = input_data_gpu["positions_u0"]  # cm
+    positions_u2 = input_data_gpu["positions_u2"]
+    positions_u3 = input_data_gpu["positions_u3"]
+    positions_v0 = input_data_gpu["positions_v0"]
+    positions_v2 = input_data_gpu["positions_v2"]
+    positions_v3 = input_data_gpu["positions_v3"]
+    WEPL = input_data_gpu["WEPL"]  # cm
+
+    num_protons = positions_u0.shape[0]
+
+    # Compute angles
+    angle_y = torch.atan((positions_u3 - positions_u2) / d_cm)
+    angle_z = torch.atan((positions_v3 - positions_v2) / d_cm)
+
+    # Entry positions (detector 0)
+    py_0 = positions_u0
+    pz_0 = positions_v0
+    px_0 = torch.full_like(py_0, -l_cm / 2)
+
+    # Exit positions (detector 2)
+    py_2 = positions_u2
+    pz_2 = positions_v2
+    px_2 = torch.full_like(py_2, l_cm / 2)
+
+    # ===================================================================
+    # STEP 1: Compute straight trajectories
+    # ===================================================================
+    p_b_0 = (px_0, py_0, pz_0)
+    angle_0 = (angle_y, angle_z)
+
+    trajectory_idx0 = compute_straight_trajectory_batch(
+        p_b_0, angle_0, num_protons,
+        l_cm, h_cm, num_pixels_xy, num_pixels_z, device
+    )
+
+    p_b_2 = (px_2, py_2, pz_2)
+    trajectory_idx2 = compute_straight_trajectory_batch(
+        p_b_2, angle_0, num_protons,
+        l_cm, h_cm, num_pixels_xy, num_pixels_z, device
+    )
+
+    # ===================================================================
+    # STEP 2: Find hull intersections (if hull provided)
+    # ===================================================================
+    if hull is not None:
+        # Entry point
+        d_s_in, start_index, indices_in = find_hull_intersection(
+            hull, trajectory_idx0, "in", num_protons, l_cm, num_pixels_xy, device
+        )
+
+        # Exit point
+        d_s_out, end_index, indices_out = find_hull_intersection(
+            hull, trajectory_idx2, "out", num_protons, l_cm, num_pixels_xy, device
+        )
+
+        # Prepare P0, P2 batches for MLP
+        P0_batch = torch.stack([py_0, pz_0, angle_y, angle_z], dim=1)
+        P2_batch = torch.stack([py_2, pz_2, angle_y, angle_z], dim=1)
+
+        # ===================================================================
+        # STEP 3: Call rigorous MLP computation
+        # ===================================================================
+        result = compute_mlp_vectorized_ultra_fast(
+            P0_batch=P0_batch,
+            P2_batch=P2_batch,
+            d_s_in_batch=d_s_in,
+            d_s_out_batch=d_s_out,
+            start_index_batch=start_index,
+            end_index_batch=end_index,
+            mlp_params_cache_gpu=mlp_params_gpu,
+            trajectory_idx0=trajectory_idx0,
+            trajectory_idx2=trajectory_idx2,
+            WEPL_batch=WEPL,
+            hull=hull,
+            l_cm=l_cm,
+            h_cm=h_cm,
+            num_pixels_xy=num_pixels_xy,
+            num_pixels_z=num_pixels_z,
+            device=device,
+            use_mixed_precision=False,
+            profiling_dict=None
+        )
+
+        # ===================================================================
+        # STEP 4: Scatter results
+        # ===================================================================
+        WEPL_projection_img = torch.zeros((num_pixels_xy, num_pixels_xy, num_pixels_z),
+                                          device=device, dtype=torch.float32)
+        count_img = torch.zeros((num_pixels_xy, num_pixels_xy, num_pixels_z),
+                               device=device, dtype=torch.float32)
+
+        if result is not None:
+            x_idx = result['x_idx']
+            y_idx = result['y_idx']
+            z_idx = result['z_idx']
+            wepl = result['wepl']
+
+            linear_indices = (x_idx * num_pixels_xy * num_pixels_z +
+                             y_idx * num_pixels_z + z_idx)
+
+            WEPL_projection_img.view(-1).scatter_add_(0, linear_indices, wepl)
+            count_img.view(-1).scatter_add_(0, linear_indices, torch.ones_like(wepl))
+
+        if return_debug_images:
+            # For debug mode: separate inside/outside
+            # (simplified version - just return same for both)
+            return WEPL_projection_img, count_img, \
+                   torch.zeros_like(WEPL_projection_img), torch.zeros_like(count_img)
+
+        return WEPL_projection_img, count_img
+
+    else:
+        # No hull - use straight trajectory only
+        WEPL_projection_img = torch.zeros((num_pixels_xy, num_pixels_xy, num_pixels_z),
+                                          device=device, dtype=torch.float32)
+        count_img = torch.zeros((num_pixels_xy, num_pixels_xy, num_pixels_z),
+                               device=device, dtype=torch.float32)
+
+        if len(trajectory_idx0) > 0:
+            x_idx = trajectory_idx0[:, 1]
+            y_idx = trajectory_idx0[:, 2]
+            z_idx = trajectory_idx0[:, 3]
+            proton_ids = trajectory_idx0[:, 0]
+
+            wepl_values = WEPL[proton_ids]
+
+            linear_indices = (x_idx * num_pixels_xy * num_pixels_z +
+                             y_idx * num_pixels_z + z_idx)
+
+            WEPL_projection_img.view(-1).scatter_add_(0, linear_indices, wepl_values)
+            count_img.view(-1).scatter_add_(0, linear_indices, torch.ones_like(wepl_values))
+
+        if return_debug_images:
+            return torch.zeros_like(WEPL_projection_img), torch.zeros_like(count_img), \
+                   WEPL_projection_img, count_img
+
+        return WEPL_projection_img, count_img

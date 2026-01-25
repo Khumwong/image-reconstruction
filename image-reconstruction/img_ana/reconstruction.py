@@ -7,10 +7,11 @@ from pathlib import Path
 from typing import List, Union, Dict, Optional
 from collections import defaultdict
 
-from .core import get_mlp_parameters, create_hull, rotate_hull
+from .core import get_mlp_parameters, get_mlp_parameters_rigorous, create_hull, rotate_hull
 from .processing import (
     load_csv_fast, clean_data_batch,
     compute_mlp_img_recon_style,
+    compute_mlp_rigorous,
     rotate_image_gpu_batched, compute_average_image
 )
 from .visualization import (
@@ -130,16 +131,16 @@ class HullImageReconstruction:
         os.makedirs(self.output_path / "WEPL", exist_ok=True)
         os.makedirs(self.output_path / "average", exist_ok=True)
 
-        # Load MLP parameters
+        # Load MLP parameters (RIGOROUS version with scattering matrices)
         print("\n" + "="*70)
-        print("Computing MLP parameters (img_recon.py style)...")
+        print("Computing RIGOROUS MLP parameters (scattering matrices)...")
         print("="*70)
         t0 = time.time()
-        mlp_parameters = get_mlp_parameters(
+        mlp_parameters = get_mlp_parameters_rigorous(
             l_mm=self.l_mm,
             num_pixels=self.num_pixels_xy,
-            recalculate=False,
-            use_fast=True
+            recalculate=True,   # Force recompute with correct method
+            use_fast=False      # Use numerical integration (CORRECT, but slow)
         )
         print(f"  Done: {time.time()-t0:.1f}s\n")
 
@@ -344,14 +345,14 @@ class HullImageReconstruction:
             hull_rot = rotate_hull(hull, angle, self.device)
             print(" Done!")
 
-        # Initialize MLP cache on first use (img_recon.py format)
+        # Initialize MLP cache on first use (RIGOROUS format: scattering matrices)
         if self._mlp_params_cache_gpu is None:
             self._mlp_params_cache_gpu = {
-                "X_position": torch.from_numpy(mlp_parameters["X_position"]).to(self.device).float(),
-                "G1": torch.from_numpy(mlp_parameters["G1"]).to(self.device).float(),
-                "G2": torch.from_numpy(mlp_parameters["G2"]).to(self.device).float(),
-                "H1": torch.from_numpy(mlp_parameters["H1"]).to(self.device).float(),
-                "H2": torch.from_numpy(mlp_parameters["H2"]).to(self.device).float()
+                "Sigma1": torch.from_numpy(mlp_parameters["Sigma1"]).to(self.device).float(),
+                "Sigma2": torch.from_numpy(mlp_parameters["Sigma2"]).to(self.device).float(),
+                "R0": torch.from_numpy(mlp_parameters["R0"]).to(self.device).float(),
+                "R1": torch.from_numpy(mlp_parameters["R1"]).to(self.device).float(),
+                "X1": torch.from_numpy(mlp_parameters["X1"]).to(self.device).float()
             }
 
         # Process each file
@@ -374,8 +375,8 @@ class HullImageReconstruction:
             profiling = {'total_protons': 0}
 
             for offset, input_data_gpu in input_data_dict.items():
-                # Normal reconstruction (masked)
-                WEPL_img, count_img = compute_mlp_img_recon_style(
+                # Normal reconstruction (masked) - RIGOROUS MLP
+                WEPL_img, count_img = compute_mlp_rigorous(
                     input_data_gpu, self._mlp_params_cache_gpu, hull_rot,
                     self.l_mm, self.d_mm, self.h_mm,
                     self.num_pixels_xy, self.num_pixels_z, self.device
@@ -385,7 +386,7 @@ class HullImageReconstruction:
 
                 # Debug visualization (separated inside/outside)
                 if hull_rot is not None:
-                    WEPL_in, count_in, WEPL_out, count_out = compute_mlp_img_recon_style(
+                    WEPL_in, count_in, WEPL_out, count_out = compute_mlp_rigorous(
                         input_data_gpu, self._mlp_params_cache_gpu, hull_rot,
                         self.l_mm, self.d_mm, self.h_mm,
                         self.num_pixels_xy, self.num_pixels_z, self.device,

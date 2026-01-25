@@ -4,7 +4,8 @@ from .trajectory import (
     compute_straight_trajectory_batch,
     find_hull_intersection,
     compute_mlp_vectorized_ultra_fast,
-    compute_mlp_img_recon_style
+    compute_mlp_img_recon_style,
+    compute_mlp_rigorous
 )
 from .projection import (
     rotate_image_gpu_batched,
@@ -19,6 +20,7 @@ __all__ = [
     'find_hull_intersection',
     'compute_mlp_vectorized_ultra_fast',
     'compute_mlp_img_recon_style',
+    'compute_mlp_rigorous',
     'rotate_image_gpu_batched',
     'accumulate_projection',
     'compute_average_image'
